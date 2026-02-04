@@ -1,31 +1,28 @@
-import mysql.connector
+import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 import json
+import os
 
 class Database:
-    def __init__(self):
+    def __init__(self, db_path="sales_system.db"):
+        self.db_path = db_path
         self.connection = None
         self.connect()
         
     def connect(self):
         """Establish database connection"""
         try:
-            self.connection = mysql.connector.connect(
-                host="localhost",
-                user="root",
-                password="password",
-                database="sales_system",
-                port=3306
-            )
-            print("Database connected successfully")
-        except mysql.connector.Error as err:
+            self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.connection.row_factory = sqlite3.Row  # This enables dictionary-like access
+            print(f"Database connected successfully: {self.db_path}")
+        except sqlite3.Error as err:
             print(f"Error: {err}")
             # Create in-memory data for demo
             self.connection = None
             
     def get_connection(self):
-        if not self.connection or not self.connection.is_connected():
+        if not self.connection:
             self.connect()
         return self.connection
     
@@ -34,15 +31,23 @@ class Database:
         if conn is None:
             return None
             
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         try:
-            cursor.execute(query, params or ())
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+                
             if query.strip().upper().startswith('SELECT'):
-                return cursor.fetchall()
+                results = cursor.fetchall()
+                # Convert sqlite3.Row objects to dictionaries
+                return [dict(row) for row in results]
             conn.commit()
             return True
         except Exception as e:
             print(f"Query error: {e}")
+            print(f"Query: {query}")
+            print(f"Params: {params}")
             return None
         finally:
             cursor.close()
@@ -52,41 +57,41 @@ class Database:
         queries = [
             """
             CREATE TABLE IF NOT EXISTS users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(50) UNIQUE NOT NULL,
-                password VARCHAR(255) NOT NULL,
-                role ENUM('admin', 'manager', 'clerk') DEFAULT 'clerk',
-                email VARCHAR(100),
-                is_active BOOLEAN DEFAULT TRUE,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                role TEXT CHECK(role IN ('admin', 'manager', 'clerk')) DEFAULT 'clerk',
+                email TEXT,
+                is_active BOOLEAN DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """,
             """
             CREATE TABLE IF NOT EXISTS products (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(100) NOT NULL,
-                category VARCHAR(50),
-                price DECIMAL(10, 2) NOT NULL,
-                stock_quantity INT DEFAULT 0,
-                min_stock_level INT DEFAULT 10,
-                max_stock_level INT DEFAULT 100,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category TEXT,
+                price REAL NOT NULL,
+                stock_quantity INTEGER DEFAULT 0,
+                min_stock_level INTEGER DEFAULT 10,
+                max_stock_level INTEGER DEFAULT 100,
                 description TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """,
             """
             CREATE TABLE IF NOT EXISTS sales (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                transaction_id VARCHAR(20) UNIQUE,
-                product_id INT,
-                quantity INT,
-                unit_price DECIMAL(10, 2),
-                total_price DECIMAL(10, 2),
-                tax_amount DECIMAL(10, 2),
-                payment_method VARCHAR(20),
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_id TEXT UNIQUE,
+                product_id INTEGER,
+                quantity INTEGER,
+                unit_price REAL,
+                total_price REAL,
+                tax_amount REAL,
+                payment_method TEXT,
                 customer_info TEXT,
-                user_id INT,
+                user_id INTEGER,
                 sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (product_id) REFERENCES products(id),
                 FOREIGN KEY (user_id) REFERENCES users(id)
@@ -94,12 +99,12 @@ class Database:
             """,
             """
             CREATE TABLE IF NOT EXISTS inventory_log (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                product_id INT,
-                action VARCHAR(20),
-                quantity_change INT,
-                new_quantity INT,
-                user_id INT,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER,
+                action TEXT,
+                quantity_change INTEGER,
+                new_quantity INTEGER,
+                user_id INTEGER,
                 notes TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (product_id) REFERENCES products(id),
@@ -108,14 +113,14 @@ class Database:
             """,
             """
             CREATE TABLE IF NOT EXISTS settings (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                business_name VARCHAR(100),
-                tax_rate DECIMAL(5, 2) DEFAULT 16.0,
-                currency VARCHAR(10) DEFAULT 'KES',
-                low_stock_alert BOOLEAN DEFAULT TRUE,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                business_name TEXT,
+                tax_rate REAL DEFAULT 16.0,
+                currency TEXT DEFAULT 'KES',
+                low_stock_alert BOOLEAN DEFAULT 1,
                 receipt_template TEXT,
-                email_notifications BOOLEAN DEFAULT FALSE,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                email_notifications BOOLEAN DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         ]
@@ -123,15 +128,33 @@ class Database:
         for query in queries:
             self.execute_query(query)
         
+        # Create trigger for updated_at in products table
+        self.execute_query("""
+            CREATE TRIGGER IF NOT EXISTS update_products_timestamp 
+            AFTER UPDATE ON products
+            BEGIN
+                UPDATE products SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END;
+        """)
+        
+        # Create trigger for updated_at in settings table
+        self.execute_query("""
+            CREATE TRIGGER IF NOT EXISTS update_settings_timestamp 
+            AFTER UPDATE ON settings
+            BEGIN
+                UPDATE settings SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END;
+        """)
+        
         # Insert default admin user
         self.execute_query("""
-            INSERT IGNORE INTO users (username, password, role, email) 
+            INSERT OR IGNORE INTO users (username, password, role, email) 
             VALUES ('admin', 'admin123', 'admin', 'admin@system.com')
         """)
         
         # Insert default settings
         self.execute_query("""
-            INSERT IGNORE INTO settings (business_name) 
+            INSERT OR IGNORE INTO settings (business_name) 
             VALUES ('Lukenya Getaway Resort')
         """)
     
@@ -157,3 +180,62 @@ class Database:
         ]
         
         return products, users
+    
+    def backup_database(self, backup_path=None):
+        """Create a backup of the SQLite database"""
+        if backup_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"sales_system_backup_{timestamp}.db"
+        
+        try:
+            source = self.get_connection()
+            if source:
+                # Create a new connection for the backup
+                backup_conn = sqlite3.connect(backup_path)
+                source.backup(backup_conn)
+                backup_conn.close()
+                print(f"Database backup created: {backup_path}")
+                return backup_path
+        except Exception as e:
+            print(f"Backup error: {e}")
+            return None
+    
+    def export_to_csv(self, table_name, export_path=None):
+        """Export table data to CSV"""
+        if export_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            export_path = f"{table_name}_{timestamp}.csv"
+        
+        try:
+            data = self.execute_query(f"SELECT * FROM {table_name}")
+            if data:
+                df = pd.DataFrame(data)
+                df.to_csv(export_path, index=False)
+                print(f"Exported {table_name} to {export_path}")
+                return export_path
+        except Exception as e:
+            print(f"Export error: {e}")
+            return None
+    
+    def close(self):
+        """Close the database connection"""
+        if self.connection:
+            self.connection.close()
+            self.connection = None
+            print("Database connection closed")
+
+# Helper functions for compatibility with existing code
+if __name__ == "__main__":
+    # Test the database connection
+    db = Database()
+    db.create_tables()
+    
+    # Test a sample query
+    users = db.execute_query("SELECT * FROM users")
+    print(f"Users in database: {len(users) if users else 0}")
+    
+    # Test sample data
+    products, _ = db.get_sample_data()
+    print(f"Sample products: {len(products)}")
+    
+    db.close()
